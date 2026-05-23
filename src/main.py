@@ -10,8 +10,8 @@ import firebase_admin
 from firebase_admin import credentials, messaging, exceptions
 
 from .config import settings
-from .database import get_db, init_db, UserToken
-from .schemas import TokenRegistration, NotificationRequest
+from .database import get_db, init_db, UserToken, Notification
+from .schemas import TokenRegistration, NotificationRequest, PaginatedNotifications, NotificationResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -170,22 +170,153 @@ async def delete_token(user_id: str, db: Session = Depends(get_db)):
         return {"status": "ok", "message": "Token deleted"}
     return {"status": "ok", "message": "No token found"}
 
+def get_user_id_from_auth(authorization: Optional[str]) -> str:
+    """Helper to extract user_id from JWT Authorization header passed by Gateway."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.split(" ")[1]
+    payload = decode_jwt_payload_manually(token)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload: sub not found")
+    return user_id
+
 @app.post("/notify", dependencies=[Depends(verify_internal_secret)])
 async def send_notification(req: NotificationRequest, db: Session = Depends(get_db)):
-    """Sends a push notification to a user using the appropriate delivery channel."""
+    """Persists and sends a push notification to a user using the appropriate delivery channel."""
+    # 1. Always persist the notification in the DB
+    db_notification = Notification(
+        user_id=req.user_id,
+        title=req.title,
+        body=req.body,
+        data=req.data
+    )
+    db.add(db_notification)
+    db.commit()
+    db.refresh(db_notification)
+    logger.info(f"Notification persisted in DB for user {req.user_id} with ID {db_notification.id}")
+
+    # 2. Retrieve user push token
     db_token = db.query(UserToken).filter(UserToken.user_id == req.user_id).first()
     if not db_token:
-        logger.warning(f"No push token registered for user {req.user_id}. Skipping notification.")
-        return {"status": "skipped", "message": "No token found for user"}
+        logger.warning(f"No push token registered for user {req.user_id}. Push delivery skipped.")
+        return {
+            "status": "persisted",
+            "message": "Notification saved to DB, but push skipped (no token)",
+            "notification_id": db_notification.id
+        }
 
     token = db_token.fcm_token
     
-    # Route according to token format
+    # 3. Route according to token format
     if token.startswith("ExponentPushToken"):
-        return await send_via_expo(token, req.title, req.body, req.data, db_token, db)
+        push_res = await send_via_expo(token, req.title, req.body, req.data, db_token, db)
     else:
-        return send_via_fcm(token, req.title, req.body, req.data, db_token, db)
+        push_res = send_via_fcm(token, req.title, req.body, req.data, db_token, db)
+
+    # Add notification_id to push result for reference
+    if isinstance(push_res, dict):
+        push_res["notification_id"] = db_notification.id
+    return push_res
+
+@app.get("/", response_model=PaginatedNotifications)
+async def get_notifications(
+    page: int = 1,
+    per_page: int = 20,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Retrieves paginated notifications for the authenticated user, ordered from newest to oldest (CA.3)."""
+    user_id = get_user_id_from_auth(authorization)
+    
+    if page < 1:
+        page = 1
+    if per_page < 1 or per_page > 100:
+        per_page = 20
+        
+    query = db.query(Notification).filter(
+        Notification.user_id == user_id,
+        Notification.is_deleted == False
+    )
+    
+    total = query.count()
+    pages = (total + per_page - 1) // per_page if total > 0 else 0
+    
+    notifications = query.order_by(Notification.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+    
+    return {
+        "notifications": notifications,
+        "total": total,
+        "page": page,
+        "pages": pages,
+        "per_page": per_page
+    }
+
+@app.put("/{notification_id}/read")
+async def mark_as_read(
+    notification_id: int,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Marks a single notification as read for the authenticated user."""
+    user_id = get_user_id_from_auth(authorization)
+    
+    notification = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.user_id == user_id,
+        Notification.is_deleted == False
+    ).first()
+    
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+        
+    notification.is_read = True
+    db.commit()
+    logger.info(f"Notification {notification_id} marked as read for user {user_id}")
+    return {"status": "ok", "message": "Notification marked as read"}
+
+@app.put("/read-all")
+async def mark_all_as_read(
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Marks all non-deleted notifications as read for the authenticated user (CA.2)."""
+    user_id = get_user_id_from_auth(authorization)
+    
+    db.query(Notification).filter(
+        Notification.user_id == user_id,
+        Notification.is_read == False,
+        Notification.is_deleted == False
+    ).update({Notification.is_read: True}, synchronize_session=False)
+    
+    db.commit()
+    logger.info(f"All notifications marked as read for user {user_id}")
+    return {"status": "ok", "message": "All notifications marked as read"}
+
+@app.delete("/{notification_id}")
+async def delete_notification(
+    notification_id: int,
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Logically deletes a single notification for the authenticated user (CA.4, CA.5)."""
+    user_id = get_user_id_from_auth(authorization)
+    
+    notification = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.user_id == user_id,
+        Notification.is_deleted == False
+    ).first()
+    
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+        
+    notification.is_deleted = True
+    db.commit()
+    logger.info(f"Notification {notification_id} logically deleted for user {user_id}")
+    return {"status": "ok", "message": "Notification deleted successfully"}
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+

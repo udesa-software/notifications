@@ -1,0 +1,59 @@
+name: Deploy to EKS
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+      IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/tds-group-3/notifications
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: gha-tds-group-3-notifications
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push Docker image
+        run: |
+          docker build -t $IMAGE:latest -t $IMAGE:${{ github.sha }} .
+          docker push $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+      - name: Render Secret from template
+        env:
+          NOTIFICATIONS_DB_HOST: ${{ secrets.NOTIFICATIONS_DB_HOST }}
+          NOTIFICATIONS_DB_PORT: ${{ secrets.NOTIFICATIONS_DB_PORT }}
+          NOTIFICATIONS_DB_NAME: ${{ secrets.NOTIFICATIONS_DB_NAME }}
+          NOTIFICATIONS_DB_USER: ${{ secrets.NOTIFICATIONS_DB_USER }}
+          NOTIFICATIONS_DB_PASSWORD: ${{ secrets.NOTIFICATIONS_DB_PASSWORD }}
+          INTERNAL_SECRET: ${{ secrets.INTERNAL_SECRET }}
+        run: |
+          envsubst < k8s/secret.template.yaml > k8s/secret.yaml
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/secret.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+      - name: Restart deployment
+        run: |
+          kubectl rollout restart deployment/notifications -n tds-group-3
+          kubectl rollout status deployment/notifications -n tds-group-3 --timeout=180s

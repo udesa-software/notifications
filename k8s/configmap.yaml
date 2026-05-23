@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notifications-config
+  namespace: tds-group-3
+data:
+  PORT: "8080"
