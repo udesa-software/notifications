@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, codecov, h3-notif ]
   pull_request:
     branches: [ main ]
+    types: [opened, edited, reopened, synchronize]
 
 jobs:
   test:
@@ -13,11 +13,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
           cache: 'pip'
 
       - name: Install dependencies
