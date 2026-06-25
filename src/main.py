@@ -1,14 +1,13 @@
 import logging
 import os
 import httpx
-import base64
-import json
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 import firebase_admin
 from firebase_admin import credentials, messaging, exceptions
 
+from .auth_utils import decode_jwt_payload_manually, get_user_id_from_auth, verify_internal_secret
 from .config import settings
 from .database import get_db, init_db, UserToken, Notification
 from .schemas import TokenRegistration, NotificationRequest, PaginatedNotifications, NotificationResponse
@@ -33,11 +32,6 @@ if settings.FIREBASE_SERVICE_ACCOUNT_PATH and os.path.exists(settings.FIREBASE_S
         logger.error(f"Error initializing Firebase: {e}")
 else:
     logger.warning("Firebase service account path not found. Direct FCM fallback disabled (will mock direct FCM).")
-
-# Middleware to validate the internal secret for inter-microservice communication
-def verify_internal_secret(x_internal_secret: str = Header(None)):
-    if not x_internal_secret or x_internal_secret != settings.INTERNAL_SECRET:
-        raise HTTPException(status_code=403, detail="Invalid internal secret")
 
 # --- Auxiliary Sending Methods ---
 
@@ -108,23 +102,6 @@ def send_via_fcm(token: str, title: str, body: str, data: dict, db_token: UserTo
         logger.error(f"Error sending direct FCM: {e}")
         return {"status": "error", "message": str(e)}
 
-def decode_jwt_payload_manually(token: str) -> dict:
-    """Decodes a JWT payload manually without signature verification (assumes Gateway checked it)."""
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            raise ValueError("Invalid JWT format")
-        
-        payload_b64 = parts[1]
-        # Pad payload_b64 to make its length a multiple of 4
-        payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
-        
-        payload_bytes = base64.b64decode(payload_b64.replace("-", "+").replace("_", "/"))
-        return json.loads(payload_bytes.decode("utf-8"))
-    except Exception as e:
-        logger.error(f"Error decoding JWT manually: {e}")
-        return {}
-
 # --- Endpoints ---
 
 @app.post("/tokens")
@@ -169,17 +146,6 @@ async def delete_token(user_id: str, db: Session = Depends(get_db)):
         logger.info(f"Token deleted for user {user_id}")
         return {"status": "ok", "message": "Token deleted"}
     return {"status": "ok", "message": "No token found"}
-
-def get_user_id_from_auth(authorization: Optional[str]) -> str:
-    """Helper to extract user_id from JWT Authorization header passed by Gateway."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    token = authorization.split(" ")[1]
-    payload = decode_jwt_payload_manually(token)
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload: sub not found")
-    return user_id
 
 @app.post("/notify", dependencies=[Depends(verify_internal_secret)])
 async def send_notification(req: NotificationRequest, db: Session = Depends(get_db)):
@@ -319,4 +285,3 @@ async def delete_notification(
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
-
