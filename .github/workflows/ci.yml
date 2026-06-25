@@ -30,7 +30,7 @@ jobs:
 
       - name: Run unit tests with coverage
         run: |
-          PYTHONPATH=. pytest tests/unit --cov=src --cov-report=xml --cov-fail-under=85
+          PYTHONPATH=. pytest tests/unit --cov=src/main.py --cov-report=xml --cov-fail-under=85
 
       - name: Upload unit coverage to Codecov
         uses: codecov/codecov-action@v5
