@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Optional
 
+from fastapi import Header
 from fastapi import HTTPException
 
 from .config import settings
@@ -10,7 +11,7 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
-def verify_internal_secret(x_internal_secret: Optional[str] = None):
+def verify_internal_secret(x_internal_secret: Optional[str] = Header(None)):
     if not x_internal_secret or x_internal_secret != settings.INTERNAL_SECRET:
         raise HTTPException(status_code=403, detail="Invalid internal secret")
 
