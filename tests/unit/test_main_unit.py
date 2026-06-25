@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-from src.main import decode_jwt_payload_manually, get_user_id_from_auth, verify_internal_secret
+from src.auth_utils import decode_jwt_payload_manually, get_user_id_from_auth, verify_internal_secret
 
 
 def test_decode_jwt_payload_manually_returns_payload():
@@ -19,13 +19,13 @@ def test_decode_jwt_payload_manually_returns_empty_dict_for_invalid_token():
 
 
 def test_verify_internal_secret_accepts_valid_secret(monkeypatch):
-    monkeypatch.setattr("src.main.settings.INTERNAL_SECRET", "secret-ok")
+    monkeypatch.setattr("src.auth_utils.settings.INTERNAL_SECRET", "secret-ok")
 
     assert verify_internal_secret("secret-ok") is None
 
 
 def test_verify_internal_secret_rejects_invalid_secret(monkeypatch):
-    monkeypatch.setattr("src.main.settings.INTERNAL_SECRET", "secret-ok")
+    monkeypatch.setattr("src.auth_utils.settings.INTERNAL_SECRET", "secret-ok")
 
     with pytest.raises(HTTPException) as exc:
         verify_internal_secret("wrong-secret")
