@@ -10,12 +10,37 @@ from firebase_admin import credentials, messaging, exceptions
 from .auth_utils import decode_jwt_payload_manually, get_user_id_from_auth, verify_internal_secret
 from .config import settings
 from .database import get_db, init_db, UserToken, Notification
+from .observability import configure_logging
 from .schemas import TokenRegistration, NotificationRequest, PaginatedNotifications, NotificationResponse
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = configure_logging()
 
 app = FastAPI(title="Udesamigos Notifications Service")
+
+
+@app.middleware("http")
+async def log_requests(request, call_next):
+    if request.url.path in {"/health", "/favicon.ico"}:
+        return await call_next(request)
+
+    import time
+
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = round((time.perf_counter() - start) * 1000)
+    level = logging.ERROR if response.status_code >= 500 else logging.WARNING if response.status_code >= 400 else logging.INFO
+    logger.log(
+        level,
+        f"{response.status_code} {request.method} {request.url.path}",
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "status": response.status_code,
+            "duration_ms": duration_ms,
+            "request_id": request.headers.get("x-request-id"),
+        },
+    )
+    return response
 
 @app.on_event("startup")
 def on_startup():
