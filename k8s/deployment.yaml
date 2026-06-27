@@ -57,6 +57,21 @@ spec:
                 secretKeyRef:
                   name: notifications-secret
                   key: INTERNAL_SECRET
+            - name: LOKI_URL
+              valueFrom:
+                secretKeyRef:
+                  name: notifications-secret
+                  key: LOKI_URL
+            - name: LOKI_USER
+              valueFrom:
+                secretKeyRef:
+                  name: notifications-secret
+                  key: LOKI_USER
+            - name: LOKI_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: notifications-secret
+                  key: LOKI_TOKEN
           livenessProbe:
             httpGet:
               path: /health
